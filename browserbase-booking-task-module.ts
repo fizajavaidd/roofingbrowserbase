@@ -1,15 +1,10 @@
 // browserbase-booking-task-module.ts
 // This is the same booking task, but exported as a callable function
 // so the server.ts can import and call it with dynamic inputs.
+// v2 — FIXED: added waits after customer row clicks, robust profile detection, logging
 
 import { Stagehand } from "@browserbasehq/stagehand";
 import fs from "fs";
-
-// =============================================================================
-// All helpers (address normalization, time parsing, StepBuilder, executor)
-// are identical to your original task — I'm keeping them compact here.
-// The ONLY thing that changed is: inputs come from function args, not env vars.
-// =============================================================================
 
 const DEBUG = process.env.DEBUG === "true" || process.env.DEBUG === "1";
 const DEBUG_DIR = process.env.DEBUG_DIR || "./debug";
@@ -72,7 +67,7 @@ function extractHourFromDataCy(dc: string): number | null {
   return dc?.match(/T(\d{2}):\d{2}:\d{2}/) ? parseInt(dc.match(/T(\d{2}):\d{2}:\d{2}/)![1], 10) : null;
 }
 
-// --- Step infrastructure (same as before, abbreviated for clarity) ---
+// --- Step infrastructure ---
 interface StepDef { name: string; action: any; validator: any; skipIf: any; onSuccess: any; timeout: number; }
 
 class StepBuilder {
@@ -188,7 +183,6 @@ function buildSteps(I: any): StepDef[] {
     step("Fill password").fill('input[type="password"]', I.stratabluePassword).build(),
     step("Wait before login click").wait(1000).build(),
     step("Click login button").custom(async (page: any) => {
-      // Try multiple selectors — Sera's button may not have type="submit"
       const selectors = [
         'button:has-text("Sign In")',
         'button:has-text("Login")',
@@ -210,7 +204,6 @@ function buildSteps(I: any): StepDef[] {
     }).build(),
     step("Wait for page to load after login").wait(5000).build(),
     step("Wait for dashboard").custom(async (page: any) => {
-      // Wait up to 30s for URL to change away from /login
       for (let i = 0; i < 30; i++) {
         const url = page.url();
         if (!url.includes("/login")) {
@@ -226,10 +219,18 @@ function buildSteps(I: any): StepDef[] {
     step("Navigate to customers page").goto("https://misterquik.sera.tech/customers").expectVisible("table, .customers-list").build(),
     step("Search by address").fill('th.address-field input, th[class*="address"] input', I.serviceAddress.split(",")[0].trim()).build(),
     step("Wait for search results").wait(10000).build(),
+
+    // FIX 1: Added console.log + waitForTimeout(5000) after click
     step("Check if customer found by address").custom(async (page: any, ctx: any) => {
       const rows = page.locator("table tbody tr"); const count = await rows.count();
+      console.log(`    ℹ️  Found ${count} rows in customer table`);
       for (let i = 0; i < count; i++) { const row = rows.nth(i); const t = await row.textContent();
-        if ((t.includes(I.firstName) && t.includes(I.lastName)) || t.includes(I.email) || t.includes(I.phone)) { await row.locator("a").first().click(); ctx.customerFound = true; return; }
+        if ((t.includes(I.firstName) && t.includes(I.lastName)) || t.includes(I.email) || t.includes(I.phone)) {
+          console.log(`    ℹ️  Matched row ${i}: "${t.substring(0, 100)}..."`);
+          await row.locator("a").first().click();
+          await page.waitForTimeout(5000); // FIX: wait for navigation to customer profile
+          ctx.customerFound = true; return;
+        }
       } ctx.customerFound = false;
     }).expect(async () => ({ success: true })).build(),
 
@@ -241,10 +242,18 @@ function buildSteps(I: any): StepDef[] {
       if (await pi.isVisible({ timeout: 2000 }).catch(() => false)) await pi.fill(I.phone);
     }).build(),
     step("Wait for phone search results").skipIf((_p: any, c: any) => c.customerFound).wait(10000).build(),
+
+    // FIX 2: Added console.log + waitForTimeout(5000) after click
     step("Check if customer found by phone").skipIf((_p: any, c: any) => c.customerFound).custom(async (page: any, ctx: any) => {
       const rows = page.locator("table tbody tr"); const count = await rows.count();
+      console.log(`    ℹ️  Phone search: ${count} rows`);
       for (let i = 0; i < count; i++) { const row = rows.nth(i); const t = await row.textContent();
-        if ((t.includes(I.firstName) && t.includes(I.lastName)) || t.includes(I.email)) { await row.locator("a").first().click(); ctx.customerFound = true; return; }
+        if ((t.includes(I.firstName) && t.includes(I.lastName)) || t.includes(I.email)) {
+          console.log(`    ℹ️  Matched row ${i} by phone`);
+          await row.locator("a").first().click();
+          await page.waitForTimeout(5000); // FIX: wait for navigation
+          ctx.customerFound = true; return;
+        }
       }
     }).expect(async () => ({ success: true })).build(),
 
@@ -256,13 +265,39 @@ function buildSteps(I: any): StepDef[] {
       if (await ei.isVisible({ timeout: 2000 }).catch(() => false)) await ei.fill(I.email);
     }).build(),
     step("Wait for email search results").skipIf((_p: any, c: any) => c.customerFound).wait(10000).build(),
+
+    // FIX 3: Added console.log + waitForTimeout(5000) after click
     step("Check if customer found by email").skipIf((_p: any, c: any) => c.customerFound).custom(async (page: any, ctx: any) => {
       const rows = page.locator("table tbody tr"); const count = await rows.count();
+      console.log(`    ℹ️  Email search: ${count} rows`);
       for (let i = 0; i < count; i++) { const row = rows.nth(i); const t = await row.textContent();
-        if ((t.includes(I.firstName) && t.includes(I.lastName)) || t.includes(I.email)) { await row.locator("a").first().click(); ctx.customerFound = true; return; }
+        if ((t.includes(I.firstName) && t.includes(I.lastName)) || t.includes(I.email)) {
+          console.log(`    ℹ️  Matched row ${i} by email`);
+          await row.locator("a").first().click();
+          await page.waitForTimeout(5000); // FIX: wait for navigation
+          ctx.customerFound = true; return;
+        }
       }
     }).expect(async () => ({ success: true })).build(),
-    step("Wait for customer profile (if found)").skipIf((_p: any, c: any) => !c.customerFound).waitFor('.customer-show, h3:has-text("Addresses"), .addresses-section', "visible").build(),
+
+    // FIX 4: Completely rewritten — tries multiple selectors + URL fallback
+    step("Wait for customer profile (if found)").skipIf((_p: any, c: any) => !c.customerFound).custom(async (page: any) => {
+      await page.waitForTimeout(3000);
+      const selectors = ['.customer-show', 'h3:has-text("Addresses")', '.addresses-section', '.addresses-cont', '.customer-detail', '[data-cy="address-search"]'];
+      for (const sel of selectors) {
+        if (await page.locator(sel).first().isVisible({ timeout: 3000 }).catch(() => false)) {
+          console.log(`    ℹ️  Profile loaded (found: "${sel}")`);
+          return;
+        }
+      }
+      const url = page.url();
+      if (url.includes("/customers/") && !url.endsWith("/customers")) {
+        console.log(`    ℹ️  On customer profile URL: ${url}`);
+        await page.waitForTimeout(3000);
+        return;
+      }
+      throw new Error(`Customer profile did not load. URL: ${url}`);
+    }).build(),
 
     // CREATE CUSTOMER
     step("Navigate to new customer page").skipIf((_p: any, c: any) => c.customerFound).goto("https://misterquik.sera.tech/customers/new").expectVisible('input[name*="first" i], input[placeholder*="First Name" i]').build(),
@@ -294,20 +329,24 @@ function buildSteps(I: any): StepDef[] {
 
     // LOCATE ADDRESS
     step("Search for address in customer profile").skipIf((_p: any, c: any) => !c.customerFound || c.bookingPopupOpen).custom(async (page: any) => {
-      await page.locator(".addresses-cont").waitFor({ state: "visible", timeout: 10000 });
+      await page.locator(".addresses-cont").waitFor({ state: "visible", timeout: 15000 });
       const sn = extractStreetNumber(I.serviceAddress); const sa = I.serviceAddress.split(",")[0].trim();
       const si = page.locator('sera-input[data-cy="address-search"] input').first(); await si.waitFor({ state: "visible", timeout: 5000 }); await si.fill(sn || sa); await page.waitForTimeout(1500);
     }).build(),
+
+    // FIX 5: Added logging + waitForTimeout(2000) after Schedule click
     step("Check if address exists and click Schedule").skipIf((_p: any, c: any) => !c.customerFound || c.bookingPopupOpen).custom(async (page: any, ctx: any) => {
       const sa = I.serviceAddress.split(",")[0].trim(); const cards = page.locator(".address-card"); const count = await cards.count();
+      console.log(`    ℹ️  Found ${count} address cards`);
       if (count === 0) { ctx.addressFound = false; return; }
       let found: any = null;
-      for (let i = 0; i < count; i++) { const card = cards.nth(i); const t = await card.textContent(); if (addressesMatch(t, sa)) { found = card; break; } }
-      if (!found) { ctx.addressFound = false; return; }
+      for (let i = 0; i < count; i++) { const card = cards.nth(i); const t = await card.textContent(); if (addressesMatch(t, sa)) { found = card; console.log(`    ℹ️  Address matched in card ${i}`); break; } }
+      if (!found) { console.log(`    ℹ️  Address "${sa}" not found`); ctx.addressFound = false; return; }
       ctx.addressFound = true; await found.locator('sera-button[data-cy="address-schedule-link"]').first().click();
+      await page.waitForTimeout(2000); // FIX: wait for booking modal to start loading
     }).expect(async () => ({ success: true })).build(),
 
-    // ADD NEW ADDRESS (abbreviated — same logic as full version)
+    // ADD NEW ADDRESS
     step("Open Address Actions dropdown").skipIf((_p: any, c: any) => !c.customerFound || c.addressFound || c.bookingPopupOpen).custom(async (page: any) => {
       const si = page.locator('sera-input[data-cy="address-search"] input').first();
       if (await si.isVisible({ timeout: 2000 }).catch(() => false)) { await si.clear(); await page.waitForTimeout(500); }
@@ -349,6 +388,7 @@ function buildSteps(I: any): StepDef[] {
       if (!found && count === 1 && sn) { const t = await cards.first().textContent(); if (t.includes(sn)) found = cards.first(); }
       if (!found) throw new Error(`Failed to find address "${raw}"`);
       await found.locator('sera-button[data-cy="address-schedule-link"]').first().click();
+      await page.waitForTimeout(2000); // FIX: wait for modal
     }).expectVisible('.modal, [role="dialog"], .booking-popup, .modal-content').setContext("bookingPopupOpen", true).build(),
 
     step("Wait for booking modal").skipIf((_p: any, c: any) => !c.addressFound || c.newAddressAdded || c.bookingPopupOpen).waitFor('.modal, [role="dialog"], .booking-popup, .modal-content', "visible").setContext("bookingPopupOpen", true).build(),
