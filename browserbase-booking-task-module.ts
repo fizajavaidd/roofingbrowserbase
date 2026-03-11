@@ -383,23 +383,78 @@ function buildSteps(I: any): StepDef[] {
 
     // LOCATE ADDRESS
     step("Search for address in customer profile").skipIf((_p: any, c: any) => !c.customerFound || c.bookingPopupOpen).custom(async (page: any) => {
-      await waitForVisible(page, ".addresses-cont", 15000);
-      const sn = extractStreetNumber(I.serviceAddress); const sa = I.serviceAddress.split(",")[0].trim();
-      await waitForVisible(page, 'sera-input[data-cy="address-search"] input', 5000);
-      const si = page.locator('sera-input[data-cy="address-search"] input').first();
-      await si.fill(sn || sa); await page.waitForTimeout(1500);
+      // Wait for the addresses area to load
+      await page.waitForTimeout(5000);
+
+      // Try multiple selectors for the address search input
+      const searchSelectors = [
+        '[data-cy="address-search"] input',
+        'sera-input[data-cy="address-search"] input',
+        'input[placeholder*="Search" i]',
+        'input[placeholder*="Address" i]',
+        '.addresses-cont input',
+      ];
+
+      const sn = extractStreetNumber(I.serviceAddress);
+      const sa = I.serviceAddress.split(",")[0].trim();
+      const searchTerm = sn || sa;
+
+      let filled = false;
+      for (const sel of searchSelectors) {
+        try {
+          const visible = await page.locator(sel).first().isVisible({ timeout: 2000 }).catch(() => false);
+          if (visible) {
+            await page.locator(sel).first().fill(searchTerm);
+            console.log(`    ℹ️  Filled search with "${searchTerm}" using: "${sel}"`);
+            filled = true;
+            break;
+          }
+        } catch { /* try next */ }
+      }
+
+      if (!filled) {
+        console.log(`    ⚠️  Could not find address search input — will check all address cards without filtering`);
+      }
+
+      await page.waitForTimeout(1500);
     }).build(),
 
-    // FIX 5: Added logging + waitForTimeout(2000) after Schedule click
     step("Check if address exists and click Schedule").skipIf((_p: any, c: any) => !c.customerFound || c.bookingPopupOpen).custom(async (page: any, ctx: any) => {
-      const sa = I.serviceAddress.split(",")[0].trim(); const cards = page.locator(".address-card"); const count = await cards.count();
+      const sa = I.serviceAddress.split(",")[0].trim();
+      const cards = page.locator(".address-card");
+      const count = await cards.count();
       console.log(`    ℹ️  Found ${count} address cards`);
+
       if (count === 0) { ctx.addressFound = false; return; }
-      let found: any = null;
-      for (let i = 0; i < count; i++) { const card = cards.nth(i); const t = await card.textContent(); if (addressesMatch(t, sa)) { found = card; console.log(`    ℹ️  Address matched in card ${i}`); break; } }
-      if (!found) { console.log(`    ℹ️  Address "${sa}" not found`); ctx.addressFound = false; return; }
-      ctx.addressFound = true; await found.locator('sera-button[data-cy="address-schedule-link"]').first().click();
-      await page.waitForTimeout(2000); // FIX: wait for booking modal to start loading
+
+      let matchedIndex = -1;
+      for (let i = 0; i < count; i++) {
+        const card = cards.nth(i);
+        const t = await card.textContent();
+        if (addressesMatch(t, sa)) {
+          matchedIndex = i;
+          console.log(`    ℹ️  Address matched in card ${i}`);
+          break;
+        }
+      }
+
+      if (matchedIndex === -1) {
+        console.log(`    ℹ️  Address "${sa}" not found in any card`);
+        ctx.addressFound = false;
+        return;
+      }
+
+      ctx.addressFound = true;
+      // Use page-level selector to click Schedule button (avoids card.locator issue)
+      try {
+        const scheduleBtn = page.locator('.address-card').nth(matchedIndex).locator('sera-button[data-cy="address-schedule-link"]');
+        await scheduleBtn.first().click();
+      } catch {
+        // Fallback: click nth schedule button on page
+        console.log(`    ℹ️  Fallback: clicking schedule button by index`);
+        await page.locator('sera-button[data-cy="address-schedule-link"]').nth(matchedIndex).click();
+      }
+      await page.waitForTimeout(2000);
     }).expect(async () => ({ success: true })).build(),
 
     // ADD NEW ADDRESS
