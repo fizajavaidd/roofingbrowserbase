@@ -341,17 +341,17 @@ function buildSteps(I: any): Step[] {
               try {
                 await page.goto(`https://misterquik.sera.tech/customers/${idMatch[1]}`, {
                   waitUntil: "domcontentloaded",
-                  timeout: 60000,
+                  timeout: 100000,
                 });
               } catch {
                 // waitForMainLoadState can time out on slow SPAs — ignore and wait
                 console.log(`    ℹ️  goto timed out — waiting for page to settle`);
-                await page.waitForTimeout(5000);
+                await page.waitForTimeout(100000);
               }
             } else {
               await clickNth(page, "table tbody tr a", i);
             }
-            await page.waitForTimeout(5000);
+            await page.waitForTimeout(100000);
             ctx.customerFound = true;
             return;
           }
@@ -372,7 +372,7 @@ function buildSteps(I: any): Step[] {
         }
         const phoneSel = await firstVisible(page, ['th.phone-field input', 'th[class*="phone"] input']);
         if (phoneSel) await page.locator(phoneSel).first().fill(I.phone);
-        await page.waitForTimeout(10000);
+        await page.waitForTimeout(100000);
       },
     },
     {
