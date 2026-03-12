@@ -264,18 +264,24 @@ function buildSteps(I: any): Step[] {
       name: "Click login button",
       async run(page) {
         await page.waitForTimeout(1000);
-        const candidates = [
-          'button:has-text("Sign In")',
-          'button:has-text("Login")',
-          'button:has-text("Log In")',
-          'input[type="submit"]',
-          'button[type="submit"]',
-          ".btn-primary",
-          "button.btn",
-        ];
-        const sel = await firstVisible(page, candidates, 3000);
-        if (!sel) throw new Error("Login button not found");
-        await page.locator(sel).first().click();
+        // Use evaluate to find login button by text — avoids :has-text() pseudo-selector
+        const clicked = await page.evaluate(() => {
+          const keywords = ["sign in", "login", "log in"];
+          const btn = Array.from(document.querySelectorAll('button, input[type="submit"]')).find(
+            el =>
+              keywords.some(kw => el.textContent?.toLowerCase().trim() === kw ||
+                (el as HTMLInputElement).value?.toLowerCase() === kw) &&
+              (el as HTMLElement).offsetParent !== null
+          ) as HTMLElement | null;
+          if (btn) { btn.click(); return true; }
+          return false;
+        });
+        if (!clicked) {
+          // Fallback to type=submit or .btn-primary
+          const fallback = await firstVisible(page, ['input[type="submit"]', 'button[type="submit"]', ".btn-primary", "button.btn"], 3000);
+          if (!fallback) throw new Error("Login button not found");
+          await page.locator(fallback).first().click();
+        }
       },
     },
     {
@@ -448,7 +454,6 @@ function buildSteps(I: any): Step[] {
         await page.waitForTimeout(3000);
         const profileSelectors = [
           ".customer-show",
-          'h3:has-text("Addresses")',
           ".addresses-section",
           ".addresses-cont",
           ".customer-detail",
@@ -754,7 +759,7 @@ function buildSteps(I: any): Step[] {
       name: "Save new address",
       skipIf: (_, c) => addressFoundOrPopup(c),
       async run(page, ctx) {
-        const modalSaveSel = '.modal button:has-text("Save"), [role="dialog"] button:has-text("Save"), .modal sera-button:has-text("Save"), [role="dialog"] sera-button:has-text("Save")';
+        const modalSaveSel = '.modal button[type="submit"], [role="dialog"] button[type="submit"]';
         // Use evaluate for robustness
         const saved = await page.evaluate(() => {
           const modal = document.querySelector('.modal, [role="dialog"]');
@@ -887,22 +892,100 @@ function buildSteps(I: any): Step[] {
     },
 
     // =========================================================================
-    // SELECT DATE (AI agent)
+    // SELECT DATE — try AI agent first, fall back to DOM click on quota error
     // =========================================================================
     {
       name: "Select date on calendar",
-      async run(_page, _ctx, stagehand) {
-        const agent = stagehand.agent({
-          mode: "cua",
-          model: "google/gemini-2.5-computer-use-preview-10-2025",
-        });
-        await agent.execute(
-          `Look at the calendar in the booking modal. ` +
-          `Target Date: ${I.appointmentDate} (${I.appointmentDateMonth}, day ${I.appointmentDateDay}). ` +
-          `Scroll down to see the calendar, navigate to ${I.appointmentDateMonth} if needed, ` +
-          `then click ONLY day "${I.appointmentDateDay}". ` +
-          `Do NOT select any other date. STOP when time slots appear.`
-        );
+      async run(page, _ctx, stagehand) {
+        const domClickDate = async () => {
+          // Navigate to correct month if needed — click prev/next arrows
+          const targetMonth = I.appointmentDateMonth; // e.g. "March"
+          const targetDay   = String(I.appointmentDateDay);
+
+          for (let nav = 0; nav < 3; nav++) {
+            // Check if current calendar header contains target month
+            const headerText: string = await page.evaluate(() => {
+              const h = document.querySelector(
+                '.fc-toolbar-title, .calendar-header, .month-title, ' +
+                'th.fc-col-header-cell, [class*="calendar"] h1, [class*="calendar"] h2, ' +
+                '[class*="calendar"] h3, [class*="month"]'
+              );
+              return h ? h.textContent || "" : document.body.textContent || "";
+            });
+
+            if (headerText.includes(targetMonth)) break;
+
+            // Click "next month" button
+            const nextClicked = await page.evaluate(() => {
+              const btn = (
+                document.querySelector('.fc-next-button, [aria-label="next"], [aria-label="Next"]') ||
+                Array.from(document.querySelectorAll("button")).find(
+                  b => b.textContent?.trim() === ">" || b.textContent?.trim() === "→" ||
+                       b.getAttribute("aria-label")?.toLowerCase().includes("next")
+                )
+              ) as HTMLElement | null;
+              if (btn) { btn.click(); return true; }
+              return false;
+            });
+            if (!nextClicked) break;
+            await page.waitForTimeout(800);
+          }
+
+          // Click the target day cell
+          const dayClicked = await page.evaluate((day: string) => {
+            // Try data-date attributes first (FullCalendar style)
+            const byCy = Array.from(
+              document.querySelectorAll('[data-cy^="calendar-day-"], [data-date], td.fc-daygrid-day, .calendar-day')
+            ).find(el => {
+              const dc  = el.getAttribute("data-cy") || "";
+              const dd  = el.getAttribute("data-date") || "";
+              const txt = el.textContent?.trim() || "";
+              return dc.endsWith(`-${day}`) || dd.endsWith(`-${day.padStart(2, "0")}`) || txt === day;
+            }) as HTMLElement | null;
+            if (byCy) { byCy.click(); return true; }
+
+            // Fallback: find any visible element whose trimmed text is exactly the day number
+            const byText = Array.from(document.querySelectorAll("td, .day, button")).find(el => {
+              const t = el.textContent?.trim();
+              return t === day && (el as HTMLElement).offsetParent !== null;
+            }) as HTMLElement | null;
+            if (byText) { byText.click(); return true; }
+            return false;
+          }, targetDay);
+
+          if (!dayClicked) throw new Error(`DOM fallback: could not click day "${targetDay}" on calendar`);
+          console.log(`    ℹ️  DOM fallback: clicked day ${targetDay}`);
+          await page.waitForTimeout(1000);
+        };
+
+        // --- Try AI agent ---
+        try {
+          const agent = stagehand.agent({
+            mode: "cua",
+            model: "google/gemini-2.5-computer-use-preview-10-2025",
+          });
+          await agent.execute(
+            `Look at the calendar in the booking modal. ` +
+            `Target Date: ${I.appointmentDate} (${I.appointmentDateMonth}, day ${I.appointmentDateDay}). ` +
+            `Scroll down to see the calendar, navigate to ${I.appointmentDateMonth} if needed, ` +
+            `then click ONLY day "${I.appointmentDateDay}". ` +
+            `Do NOT select any other date. STOP when time slots appear.`
+          );
+          console.log(`    ℹ️  AI agent completed date selection`);
+        } catch (agentErr: any) {
+          const isQuota =
+            agentErr?.message?.includes("429") ||
+            agentErr?.message?.includes("RESOURCE_EXHAUSTED") ||
+            agentErr?.message?.includes("quota");
+          if (isQuota) {
+            console.log(`    ⚠️  AI agent quota error — falling back to DOM date click`);
+            await domClickDate();
+          } else {
+            // Non-quota error: still try DOM fallback before giving up
+            console.log(`    ⚠️  AI agent error (${agentErr.message}) — trying DOM fallback`);
+            await domClickDate();
+          }
+        }
       },
     },
     {
@@ -1048,15 +1131,59 @@ function buildSteps(I: any): Step[] {
       name: "Click Save (modal flow)",
       skipIf: (_, c) => !!c.newCustomerCreated,
       async run(page) {
-        const saveSel = '[data-cy="modal-submit-btn"], button:has-text("Save"), button[type="submit"]';
-        await page.locator(saveSel).first().click();
+        // Try data-cy first, then find any visible Save/Submit button via evaluate
+        const byCy = await page.locator('[data-cy="modal-submit-btn"]').first().isVisible();
+        if (byCy) {
+          await page.locator('[data-cy="modal-submit-btn"]').first().click();
+          return;
+        }
+
+        const clicked = await page.evaluate(() => {
+          // Look inside any open modal first
+          const modal = document.querySelector('.modal-content, [role="dialog"], .booking-popup');
+          const scope = modal || document;
+          const btn = Array.from(scope.querySelectorAll('button, input[type="submit"]')).find(
+            el =>
+              ["save", "submit", "schedule"].some(kw =>
+                el.textContent?.toLowerCase().includes(kw) ||
+                (el as HTMLInputElement).value?.toLowerCase().includes(kw)
+              ) && (el as HTMLElement).offsetParent !== null
+          ) as HTMLElement | null;
+          if (btn) { btn.click(); return btn.textContent?.trim() || "button"; }
+          return null;
+        });
+
+        if (!clicked) {
+          // Last resort: click by type=submit
+          await page.locator('button[type="submit"]').first().click();
+        } else {
+          console.log(`    ℹ️  Clicked save button: "${clicked}"`);
+        }
       },
     },
     {
       name: "Click Save (new customer flow)",
       skipIf: (_, c) => !c.newCustomerCreated,
       async run(page) {
-        await page.locator('[data-cy="save-job"], button:has-text("Schedule Appointment")').first().click();
+        const byCy = await page.locator('[data-cy="save-job"]').first().isVisible();
+        if (byCy) {
+          await page.locator('[data-cy="save-job"]').first().click();
+          return;
+        }
+
+        const clicked = await page.evaluate(() => {
+          const btn = Array.from(document.querySelectorAll("button")).find(
+            el =>
+              ["schedule appointment", "save", "submit"].some(kw =>
+                el.textContent?.toLowerCase().includes(kw)
+              ) && (el as HTMLElement).offsetParent !== null
+          ) as HTMLElement | null;
+          if (btn) { btn.click(); return btn.textContent?.trim(); }
+          return null;
+        });
+
+        if (!clicked) throw new Error("Could not find Schedule Appointment / Save button");
+        console.log(`    ℹ️  Clicked: "${clicked}"`);
       },
     },
     {
