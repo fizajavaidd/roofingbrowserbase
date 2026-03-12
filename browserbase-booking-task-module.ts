@@ -243,7 +243,7 @@ function buildSteps(I: any): Step[] {
       name: "Navigate to login page",
       async run(page) {
         await page.goto("https://misterquik.sera.tech/admins/login", { waitUntil: "domcontentloaded", timeout: 30000 });
-        await waitUntilVisible(page, 'input[type="email"], input[name="email"]', 15000);
+        await waitUntilVisible(page, 'input[type="email"], input[name="email"]', 150000);
       },
     },
     {
@@ -307,7 +307,7 @@ function buildSteps(I: any): Step[] {
       name: "Navigate to customers page",
       async run(page) {
         await page.goto("https://misterquik.sera.tech/customers", { waitUntil: "domcontentloaded", timeout: 30000 });
-        await waitUntilVisible(page, "table, .customers-list", 15000);
+        await waitUntilVisible(page, "table, .customers-list", 150000);
       },
     },
     {
@@ -341,7 +341,7 @@ function buildSteps(I: any): Step[] {
               try {
                 await page.goto(`https://misterquik.sera.tech/customers/${idMatch[1]}`, {
                   waitUntil: "domcontentloaded",
-                  timeout: 60000,
+                  timeout: 100000,
                 });
               } catch {
                 // waitForMainLoadState can time out on slow SPAs — ignore and wait
@@ -844,7 +844,7 @@ function buildSteps(I: any): Step[] {
       async run(page, ctx) {
         // Wait for page to settle after modal close — addresses-cont may take a moment to re-render
         await page.waitForTimeout(3000);
-        await waitUntilVisible(page, ".addresses-cont, .address-card", 15000);
+        await waitUntilVisible(page, ".addresses-cont, .address-card", 150000);
         await page.waitForTimeout(1500);
 
         const raw = ((ctx.actualStreetAddress || I.serviceAddress) as string).split(",")[0].trim();
@@ -925,7 +925,7 @@ function buildSteps(I: any): Step[] {
       name: "Wait for booking modal",
       skipIf: (_, c) => !c.addressFound || !!c.newAddressAdded || !!c.bookingPopupOpen,
       async run(page, ctx) {
-        await waitUntilVisible(page, '.modal, [role="dialog"], .booking-popup, .modal-content', 15000);
+        await waitUntilVisible(page, '.modal, [role="dialog"], .booking-popup, .modal-content', 150000);
         ctx.bookingPopupOpen = true;
       },
     },
@@ -936,7 +936,7 @@ function buildSteps(I: any): Step[] {
     {
       name: "Wait for service category select",
       async run(page) {
-        await waitUntilVisible(page, '[data-cy="service-category-select"]', 15000);
+        await waitUntilVisible(page, '[data-cy="service-category-select"]', 150000);
       },
     },
     {
@@ -978,7 +978,7 @@ function buildSteps(I: any): Step[] {
     {
       name: "Wait for calendar to appear",
       async run(page) {
-        await waitUntilVisible(page, "table td, .calendar-day, .fc-daygrid", 15000);
+        await waitUntilVisible(page, "table td, .calendar-day, .fc-daygrid", 150000);
       },
     },
 
@@ -1095,7 +1095,7 @@ function buildSteps(I: any): Step[] {
         // Wait for time slots
         for (const sel of ['[data-cy^="time-slot-"]', ".slot-button"]) {
           try {
-            await waitUntilVisible(page, sel, 15000);
+            await waitUntilVisible(page, sel, 150000);
             return;
           } catch { /* try next */ }
         }
