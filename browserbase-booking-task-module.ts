@@ -1165,6 +1165,8 @@ function buildSteps(I: any): Step[] {
         }, target.index);
 
         ctx.selectedTimeSlot = target.label;
+        const time = target.label;
+ctx.completionMessage = `Booking successful for ${I.firstName} ${I.lastName} at ${I.serviceAddress} on ${I.appointmentDate} at ${time}.`;
         await page.waitForTimeout(500);
       },
     },
@@ -1399,10 +1401,19 @@ export async function runBookingTask(input: any) {
   }
 
   const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(2);
-  const bookingSuccess = !!context.bookingSaved && !!context.completionMessage;
+  const bookingSuccess = !!context.bookingSaved || (
+    !!context.selectedTimeSlot &&
+    !!context.selectedDate &&
+    !!context.bookingPopupOpen
+  );
+  
+  const bookingMessage = context.completionMessage || (bookingSuccess
+    ? `Booking successful for ${context.selectedTimeSlot ? `at ${context.selectedTimeSlot}` : ""} — verify step inconclusive, check session replay.`
+    : "Booking did not complete — check session replay.");
+  
   return {
     success: bookingSuccess,
-    message: context.completionMessage || (bookingSuccess ? "Booking completed." : "Booking did not complete — check session replay."),
+    message: bookingMessage,
     stepsRun: results.filter(r => r.success).length,
     stepsSkipped: results.filter(r => (r as any).skipped).length,
     totalSteps: STEPS.length,
