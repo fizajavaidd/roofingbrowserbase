@@ -101,35 +101,32 @@ export async function declineQuotesOnPage(input: {
     // ==================== STEP 4: COLLECT JOB IDS FROM TABLE ====================
     console.log("  → Collecting JOB IDs from table");
 
-    // The table has APPOINTMENT and JOB columns. We need JOB IDs.
-    // JOB column contains the job ID that maps to /jobs/{id}
+    // The table has columns: APPOINTMENT, SCHEDULED FOR, CREATED AT, CREATED SOURCE, CREATED BY, JOB, TAGS, CUSTOMER, ACTION
+    // We need one JOB ID per row. The JOB column has a plain number (no link), but the APPOINTMENT column
+    // has a link like /jobs/{jobId}?appointment_id={apptId}. We extract the jobId from that.
     const jobIds: string[] = await page.evaluate(() => {
       const ids: string[] = [];
       const rows = document.querySelectorAll('table tbody tr, tbody.table-data tr');
       for (const row of rows) {
-        const cells = row.querySelectorAll('td');
-        // Find the JOB column — it's typically the one with a link to /jobs/
-        for (const cell of cells) {
-          const link = cell.querySelector('a[href*="/jobs/"]');
-          if (link) {
-            const href = link.getAttribute('href') || '';
-            const match = href.match(/\/jobs\/(\d+)/);
-            if (match) {
-              ids.push(match[1]);
-            }
+        // Strategy: find the first <a> with href containing /jobs/ and appointment_id
+        // This is the APPOINTMENT column link which contains the JOB ID
+        const firstJobLink = row.querySelector('a[href*="/jobs/"]');
+        if (firstJobLink) {
+          const href = firstJobLink.getAttribute('href') || '';
+          const match = href.match(/\/jobs\/(\d+)/);
+          if (match) {
+            ids.push(match[1]);
+            continue; // one per row, move to next row
           }
         }
-        // Fallback: look for job ID in text that has appointment_id param
-        if (ids.length === 0 || ids.length < rows.length) {
-          for (const cell of cells) {
-            const links = cell.querySelectorAll('a');
-            for (const a of links) {
-              const href = a.getAttribute('href') || '';
-              if (href.includes('appointment_id=')) {
-                const jm = href.match(/\/jobs\/(\d+)/);
-                if (jm) ids.push(jm[1]);
-              }
-            }
+        // Fallback: look for a cell that contains just a number (the JOB column)
+        const cells = row.querySelectorAll('td');
+        for (const cell of cells) {
+          const text = cell.textContent?.trim() || '';
+          // JOB IDs are 7-digit numbers with no other text in the cell
+          if (/^\d{6,}$/.test(text)) {
+            ids.push(text);
+            break; // one per row
           }
         }
       }
@@ -140,14 +137,17 @@ export async function declineQuotesOnPage(input: {
 
     if (jobIds.length === 0) {
       // Fallback: extract from the APPOINTMENT column links
-      console.log("    ⚠️  No job IDs found via href, trying appointment links...");
+      console.log("    ⚠️  No job IDs found via primary method, trying fallback...");
       const appointmentIds: string[] = await page.evaluate(() => {
         const ids: string[] = [];
-        const links = document.querySelectorAll('tbody a[href*="/jobs/"]');
-        for (const link of links) {
-          const href = link.getAttribute('href') || '';
-          const match = href.match(/\/jobs\/(\d+)/);
-          if (match) ids.push(match[1]);
+        const rows = document.querySelectorAll('table tbody tr, tbody.table-data tr');
+        for (const row of rows) {
+          const link = row.querySelector('a[href*="/jobs/"]');
+          if (link) {
+            const href = link.getAttribute('href') || '';
+            const match = href.match(/\/jobs\/(\d+)/);
+            if (match) { ids.push(match[1]); continue; }
+          }
         }
         return ids;
       });
