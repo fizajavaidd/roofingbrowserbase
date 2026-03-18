@@ -115,8 +115,7 @@ export async function declineQuotesOnPage(input: {
             const href = link.getAttribute('href') || '';
             const match = href.match(/\/jobs\/(\d+)/);
             if (match) {
-              const jobId = match[1];
-              if (!ids.includes(jobId)) ids.push(jobId);
+              ids.push(match[1]);
             }
           }
         }
@@ -128,7 +127,7 @@ export async function declineQuotesOnPage(input: {
               const href = a.getAttribute('href') || '';
               if (href.includes('appointment_id=')) {
                 const jm = href.match(/\/jobs\/(\d+)/);
-                if (jm && !ids.includes(jm[1])) ids.push(jm[1]);
+                if (jm) ids.push(jm[1]);
               }
             }
           }
@@ -148,7 +147,7 @@ export async function declineQuotesOnPage(input: {
         for (const link of links) {
           const href = link.getAttribute('href') || '';
           const match = href.match(/\/jobs\/(\d+)/);
-          if (match && !ids.includes(match[1])) ids.push(match[1]);
+          if (match) ids.push(match[1]);
         }
         return ids;
       });
