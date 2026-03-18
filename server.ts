@@ -3,11 +3,33 @@ import { declineQuotesOnPage } from "./decline-quotes-module.js";
 import express from "express";
 import { runBookingTask } from "./browserbase-booking-task-module.js";
 import { getAppointmentPageCount } from "./appointment-page-count-module.js";
+import crypto from "crypto";
 
 const app = express();
 app.use(express.json());
 
 const API_SECRET = process.env.API_SECRET || "change-me-to-a-real-secret";
+
+// In-memory task store
+const tasks: Record<string, {
+  status: "RUNNING" | "COMPLETED" | "FAILED";
+  result: string;
+  jobsProcessed: number;
+  quotesDeclined: number;
+  startedAt: string;
+  completedAt: string | null;
+}> = {};
+
+// Clean up old tasks every 30 minutes (keep last 2 hours)
+setInterval(() => {
+  const cutoff = Date.now() - 2 * 60 * 60 * 1000;
+  for (const id of Object.keys(tasks)) {
+    const t = tasks[id];
+    if (t.completedAt && new Date(t.completedAt).getTime() < cutoff) {
+      delete tasks[id];
+    }
+  }
+}, 30 * 60 * 1000);
 
 function authCheck(req: express.Request, res: express.Response, next: express.NextFunction) {
   const token = req.headers["authorization"]?.replace("Bearer ", "");
@@ -21,6 +43,11 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
+app.get("/", (_req, res) => {
+  res.json({ service: "stratablue-automation-api", status: "running" });
+});
+
+// Booking endpoint
 app.post("/book", authCheck, async (req, res) => {
   const startTime = Date.now();
   console.log(`\n📥 Received booking request at ${new Date().toISOString()}`);
@@ -46,6 +73,7 @@ app.post("/book", authCheck, async (req, res) => {
   }
 });
 
+// Appointment page count endpoint
 app.post("/appointment-pages", authCheck, async (req, res) => {
   const dateFilter = req.body.dateFilter;
   if (!dateFilter) {
@@ -63,28 +91,79 @@ app.post("/appointment-pages", authCheck, async (req, res) => {
   }
 });
 
+// Decline quotes — starts task in background, returns taskId
 app.post("/decline-quotes", authCheck, async (req, res) => {
   const { dateFilter, pageNumber } = req.body;
   if (!dateFilter || !pageNumber) {
     res.status(400).json({ error: "Missing required fields: dateFilter, pageNumber" });
     return;
   }
-  console.log(`\n📥 Decline quotes: page=${pageNumber}, dateFilter=${dateFilter}`);
-  try {
-    const result = await declineQuotesOnPage({ dateFilter, pageNumber });
-    console.log(`📤 Result: ${result.status} — ${result.result}`);
-    res.json({
-      data: {
-        status: result.status,
+
+  const taskId = crypto.randomUUID();
+  console.log(`\n📥 Decline quotes: page=${pageNumber}, dateFilter=${dateFilter}, taskId=${taskId}`);
+
+  // Store task as running
+  tasks[taskId] = {
+    status: "RUNNING",
+    result: `Processing page ${pageNumber}...`,
+    jobsProcessed: 0,
+    quotesDeclined: 0,
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+  };
+
+  // Respond immediately with taskId
+  res.json({
+    data: {
+      status: "STARTED",
+      taskId,
+      message: `Task started for page ${pageNumber}. Poll GET /task/${taskId} for result.`,
+    },
+  });
+
+  // Run in background
+  declineQuotesOnPage({ dateFilter, pageNumber })
+    .then((result) => {
+      console.log(`📤 Task ${taskId} done: ${result.status} — ${result.result}`);
+      tasks[taskId] = {
+        status: result.status === "COMPLETED" ? "COMPLETED" : "FAILED",
         result: result.result,
         jobsProcessed: result.jobsProcessed,
         quotesDeclined: result.quotesDeclined,
-      },
+        startedAt: tasks[taskId].startedAt,
+        completedAt: new Date().toISOString(),
+      };
+    })
+    .catch((error) => {
+      console.error(`❌ Task ${taskId} failed: ${error.message}`);
+      tasks[taskId] = {
+        status: "FAILED",
+        result: `Error: ${error.message}`,
+        jobsProcessed: 0,
+        quotesDeclined: 0,
+        startedAt: tasks[taskId].startedAt,
+        completedAt: new Date().toISOString(),
+      };
     });
-  } catch (error: any) {
-    console.error(`❌ Failed: ${error.message}`);
-    res.status(500).json({ data: { status: "FAILED", result: error.message } });
+});
+
+// Poll task status
+app.get("/task/:taskId", authCheck, (req, res) => {
+  const task = tasks[req.params.taskId];
+  if (!task) {
+    res.status(404).json({ error: "Task not found" });
+    return;
   }
+  res.json({
+    data: {
+      status: task.status,
+      result: task.result,
+      jobsProcessed: task.jobsProcessed,
+      quotesDeclined: task.quotesDeclined,
+      startedAt: task.startedAt,
+      completedAt: task.completedAt,
+    },
+  });
 });
 
 const PORT = parseInt(process.env.PORT || "3000", 10);
@@ -92,6 +171,7 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 API running on port ${PORT}`);
   console.log(`   POST /book               — run a booking`);
   console.log(`   POST /appointment-pages   — get appointment page count`);
-  console.log(`   POST /decline-quotes      — decline quotes on a page`);
+  console.log(`   POST /decline-quotes      — start decline task (returns taskId)`);
+  console.log(`   GET  /task/:taskId        — poll task status`);
   console.log(`   GET  /health             — health check`);
 });
