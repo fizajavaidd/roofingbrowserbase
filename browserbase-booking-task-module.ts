@@ -8,6 +8,11 @@
 //   - locator.isVisible() takes NO arguments in Stagehand v3
 //   - page.waitForSelector() and page.waitForTimeout() exist on page
 //   - Complex interactions use page.evaluate() for bulletproof DOM access
+//
+// SEARCH ORDER: Phone → Address → Email
+// Phone is searched FIRST to prevent duplicate account creation.
+// Phone numbers are the most reliable match signal since addresses suffer
+// from formatting differences (N vs North, Ave vs Avenue, etc).
 
 import { Stagehand } from "@browserbasehq/stagehand";
 import fs from "fs";
@@ -45,6 +50,35 @@ function addressesMatch(a1: string, a2: string): boolean {
 function extractStreetNumber(address: string): string {
   return address.match(/^\d+/)?.[0] || "";
 }
+
+// =============================================================================
+// HELPERS — Phone normalization
+// =============================================================================
+
+/**
+ * Strips a phone string down to digits only for reliable comparison.
+ * Input is always 10 digits (e.g., "3176665527") but the table UI may
+ * display it with formatting like "(317) 666-5527" or "317-666-5527".
+ */
+function normalizePhone(phone: string): string {
+  if (!phone) return "";
+  return phone.replace(/\D/g, "");
+}
+
+/**
+ * Checks if a text block contains a phone number that matches the target.
+ * Handles different formatting by comparing digits-only forms.
+ */
+function textContainsPhone(text: string, phone: string): boolean {
+  const targetDigits = normalizePhone(phone);
+  if (!targetDigits || targetDigits.length < 7) return false;
+  const textDigits = text.replace(/\D/g, "");
+  return textDigits.includes(targetDigits);
+}
+
+// =============================================================================
+// HELPERS — Time
+// =============================================================================
 
 function parseRequestedTimeToHour(timeStr: string): number | null {
   if (!timeStr || timeStr === "Not Provided") return null;
@@ -264,7 +298,6 @@ function buildSteps(I: any): Step[] {
       name: "Click login button",
       async run(page) {
         await page.waitForTimeout(1000);
-        // Use evaluate to find login button by text — avoids :has-text() pseudo-selector
         const clicked = await page.evaluate(() => {
           const keywords = ["sign in", "login", "log in"];
           const btn = Array.from(document.querySelectorAll('button, input[type="submit"]')).find(
@@ -277,7 +310,6 @@ function buildSteps(I: any): Step[] {
           return false;
         });
         if (!clicked) {
-          // Fallback to type=submit or .btn-primary
           const fallback = await firstVisible(page, ['input[type="submit"]', 'button[type="submit"]', ".btn-primary", "button.btn"], 3000);
           if (!fallback) throw new Error("Login button not found");
           await page.locator(fallback).first().click();
@@ -301,7 +333,11 @@ function buildSteps(I: any): Step[] {
     },
 
     // =========================================================================
-    // FIND CUSTOMER — search by address
+    // FIND CUSTOMER
+    // SEARCH ORDER: Phone → Address → Email
+    // Phone is searched FIRST because the client reported that matching
+    // customers are being missed by address search (format differences),
+    // causing duplicate accounts.
     // =========================================================================
     {
       name: "Navigate to customers page",
@@ -310,84 +346,113 @@ function buildSteps(I: any): Step[] {
         await waitUntilVisible(page, "table, .customers-list", 150000);
       },
     },
-    {
-      name: "Search customers by address",
-      async run(page) {
-        const addrPart = I.serviceAddress.split(",")[0].trim();
-        const sel = await firstVisible(page, [
-          'th.address-field input',
-          'th[class*="address"] input',
-        ], 3000);
-        if (sel) await page.locator(sel).first().fill(addrPart);
-        await page.waitForTimeout(10000);
-      },
-    },
-    {
-      name: "Check customer found by address",
-      async run(page, ctx) {
-        const rows = page.locator("table tbody tr");
-        const count = await rows.count();
-        console.log(`    ℹ️  ${count} rows found`);
-        for (let i = 0; i < count; i++) {
-          const text = await rows.nth(i).textContent();
-          if (
-            (text.includes(I.firstName) && text.includes(I.lastName)) ||
-            text.includes(I.email) ||
-            text.includes(I.phone)
-          ) {
-            console.log(`    ℹ️  Match at row ${i}`);
-            const idMatch = text.match(/^(\d+)/);
-            if (idMatch) {
-              try {
-                await page.goto(`https://misterquik.sera.tech/customers/${idMatch[1]}`, {
-                  waitUntil: "domcontentloaded",
-                  timeout: 100000,
-                });
-              } catch {
-                // waitForMainLoadState can time out on slow SPAs — ignore and wait
-                console.log(`    ℹ️  goto timed out — waiting for page to settle`);
-                await page.waitForTimeout(5000);
-              }
-            } else {
-              await clickNth(page, "table tbody tr a", i);
-            }
-            await page.waitForTimeout(5000);
-            ctx.customerFound = true;
-            return;
-          }
-        }
-        ctx.customerFound = false;
-      },
-    },
 
-    // FALLBACK — search by phone
+    // --- PRIMARY SEARCH: Phone Number ---
     {
-      name: "Clear address search, search by phone",
-      skipIf: (_, c) => alreadyFound(c),
+      name: "Search customers by phone (primary)",
       async run(page) {
-        const addrSel = await firstVisible(page, ['th.address-field input', 'th[class*="address"] input']);
-        if (addrSel) {
-          await page.locator(addrSel).first().fill("");
-          await page.waitForTimeout(500);
+        const phoneSel = await firstVisible(page, [
+          'th.phone-field input',
+          'th[class*="phone"] input',
+        ], 5000);
+        if (phoneSel) {
+          await page.locator(phoneSel).first().fill(I.phone);
+          console.log(`    ℹ️  Searching by phone: ${I.phone}`);
+        } else {
+          console.log("    ⚠️  Phone search input not found");
         }
-        const phoneSel = await firstVisible(page, ['th.phone-field input', 'th[class*="phone"] input']);
-        if (phoneSel) await page.locator(phoneSel).first().fill(I.phone);
         await page.waitForTimeout(10000);
       },
     },
     {
       name: "Check customer found by phone",
-      skipIf: (_, c) => alreadyFound(c),
       async run(page, ctx) {
         const rows = page.locator("table tbody tr");
         const count = await rows.count();
         console.log(`    ℹ️  Phone search: ${count} rows`);
+
         for (let i = 0; i < count; i++) {
           const text = await rows.nth(i).textContent();
-          if (
-            (text.includes(I.firstName) && text.includes(I.lastName)) ||
-            text.includes(I.email)
-          ) {
+
+          // Verify the row actually contains the phone number we searched for
+          // (handles formatting differences like "(317) 666-5527" vs "3176665527")
+          const phoneMatches = textContainsPhone(text, I.phone);
+
+          if (!phoneMatches) {
+            console.log(`    ℹ️  Row ${i} doesn't contain matching phone, skipping`);
+            continue;
+          }
+
+          // Phone matches — check for secondary confirmation
+          const matchesName = text.includes(I.firstName) && text.includes(I.lastName);
+          const matchesEmail = I.email !== "Not Provided" && text.includes(I.email);
+          const matchesAddress = addressesMatch(text, I.serviceAddress.split(",")[0].trim());
+
+          if (matchesName || matchesEmail || matchesAddress) {
+            console.log(`    ✅ Customer matched by phone + ${matchesName ? "name" : matchesEmail ? "email" : "address"}`);
+          } else {
+            // Phone matches but no secondary — still use it to prevent duplicates
+            console.log(`    ℹ️  Row ${i} has matching phone but no secondary match. Using phone-only match to prevent duplicates.`);
+          }
+
+          const idMatch = text.match(/^(\d+)/);
+          if (idMatch) {
+            try {
+              await page.goto(`https://misterquik.sera.tech/customers/${idMatch[1]}`, {
+                waitUntil: "domcontentloaded",
+                timeout: 100000,
+              });
+            } catch {
+              console.log(`    ℹ️  goto timed out — waiting for page to settle`);
+              await page.waitForTimeout(5000);
+            }
+          } else {
+            await clickNth(page, "table tbody tr a", i);
+          }
+          await page.waitForTimeout(5000);
+          ctx.customerFound = true;
+          ctx.matchedBy = (matchesName || matchesEmail || matchesAddress) ? "phone" : "phone-only";
+          return;
+        }
+        ctx.customerFound = false;
+        console.log("    ℹ️  No customer found by phone number");
+      },
+    },
+
+    // --- FALLBACK SEARCH 1: Address ---
+    {
+      name: "Clear phone search, search by address",
+      skipIf: (_, c) => alreadyFound(c),
+      async run(page) {
+        const phoneSel = await firstVisible(page, ['th.phone-field input', 'th[class*="phone"] input']);
+        if (phoneSel) {
+          await page.locator(phoneSel).first().fill("");
+          await page.waitForTimeout(500);
+        }
+        const addrPart = I.serviceAddress.split(",")[0].trim();
+        const addrSel = await firstVisible(page, [
+          'th.address-field input',
+          'th[class*="address"] input',
+        ], 3000);
+        if (addrSel) await page.locator(addrSel).first().fill(addrPart);
+        await page.waitForTimeout(10000);
+      },
+    },
+    {
+      name: "Check customer found by address",
+      skipIf: (_, c) => alreadyFound(c),
+      async run(page, ctx) {
+        const rows = page.locator("table tbody tr");
+        const count = await rows.count();
+        console.log(`    ℹ️  Address search: ${count} rows`);
+        for (let i = 0; i < count; i++) {
+          const text = await rows.nth(i).textContent();
+          const matchesName = text.includes(I.firstName) && text.includes(I.lastName);
+          const matchesEmail = I.email !== "Not Provided" && text.includes(I.email);
+          const matchesPhone = textContainsPhone(text, I.phone);
+
+          if (matchesName || matchesEmail || matchesPhone) {
+            console.log(`    ✅ Customer matched by address + ${matchesName ? "name" : matchesEmail ? "email" : "phone"}`);
             const idMatch = text.match(/^(\d+)/);
             if (idMatch) {
               try {
@@ -404,20 +469,22 @@ function buildSteps(I: any): Step[] {
             }
             await page.waitForTimeout(5000);
             ctx.customerFound = true;
+            ctx.matchedBy = "address";
             return;
           }
         }
+        ctx.customerFound = false;
       },
     },
 
-    // FALLBACK — search by email
+    // --- FALLBACK SEARCH 2: Email ---
     {
-      name: "Clear phone search, search by email",
+      name: "Clear address search, search by email",
       skipIf: (_, c) => alreadyFound(c),
       async run(page) {
-        const phoneSel = await firstVisible(page, ['th.phone-field input', 'th[class*="phone"] input']);
-        if (phoneSel) {
-          await page.locator(phoneSel).first().fill("");
+        const addrSel = await firstVisible(page, ['th.address-field input', 'th[class*="address"] input']);
+        if (addrSel) {
+          await page.locator(addrSel).first().fill("");
           await page.waitForTimeout(500);
         }
         const emailSel = await firstVisible(page, ['th.email-field input', 'th[class*="email"] input']);
@@ -434,10 +501,11 @@ function buildSteps(I: any): Step[] {
         console.log(`    ℹ️  Email search: ${count} rows`);
         for (let i = 0; i < count; i++) {
           const text = await rows.nth(i).textContent();
-          if (
-            (text.includes(I.firstName) && text.includes(I.lastName)) ||
-            text.includes(I.email)
-          ) {
+          const matchesName = text.includes(I.firstName) && text.includes(I.lastName);
+          const matchesPhone = textContainsPhone(text, I.phone);
+
+          if (matchesName || matchesPhone) {
+            console.log(`    ✅ Customer matched by email + ${matchesName ? "name" : "phone"}`);
             const idMatch = text.match(/^(\d+)/);
             if (idMatch) {
               try {
@@ -454,6 +522,7 @@ function buildSteps(I: any): Step[] {
             }
             await page.waitForTimeout(5000);
             ctx.customerFound = true;
+            ctx.matchedBy = "email";
             return;
           }
         }
@@ -478,7 +547,6 @@ function buildSteps(I: any): Step[] {
           console.log(`    ℹ️  Profile confirmed via: "${found}"`);
           return;
         }
-        // Check URL as fallback
         const url = await page.url();
         if (url.includes("/customers/") && !url.endsWith("/customers")) {
           console.log(`    ℹ️  Profile URL confirmed: ${url}`);
@@ -555,12 +623,10 @@ function buildSteps(I: any): Step[] {
       name: "Select location type",
       skipIf: (_, c) => alreadyFound(c),
       async run(page) {
-        // Open the dropdown — use flat CSS descendant selector (no chaining)
         await waitUntilVisible(page, '[data-cy="location-type"] input[data-cy="select-input-field"]', 5000);
         await page.locator('[data-cy="location-type"] input[data-cy="select-input-field"]').first().click();
         await page.waitForTimeout(500);
         await waitUntilVisible(page, '[data-cy="location-type"] .select-options .option', 3000);
-        // Click matching option via evaluate
         await page.evaluate((locType: string) => {
           const options = Array.from(
             document.querySelectorAll('[data-cy="location-type"] .select-options .option')
@@ -582,7 +648,6 @@ function buildSteps(I: any): Step[] {
       name: "Add customer tag",
       skipIf: (_, c) => alreadyFound(c),
       async run(page) {
-        // Check if tag is already applied — if so, skip
         const alreadyApplied = await page.evaluate((tag: string) => {
           const pills = Array.from(document.querySelectorAll(".tag-pill, .tag-label, [class*='tag']"));
           return pills.some(el => el.textContent?.includes(tag));
@@ -600,9 +665,7 @@ function buildSteps(I: any): Step[] {
         await page.locator(tagInputSel).first().fill(I.customerTag);
         await page.waitForTimeout(2000);
 
-        // Try clicking matching option via evaluate — multiple fallbacks
         const clicked = await page.evaluate((tag: string) => {
-          // Priority 1: dropdown option list items
           const optionSelectors = [
             ".tag-option", ".tag-item", ".select-option",
             "[class*=\"dropdown\"] [class*=\"option\"]",
@@ -614,13 +677,11 @@ function buildSteps(I: any): Step[] {
             ) as HTMLElement;
             if (match) { match.click(); return "option"; }
           }
-          // Priority 2: span.tag-label
           const label = Array.from(document.querySelectorAll("span.tag-label")).find(
             el => el.textContent?.includes(tag) && (el as HTMLElement).offsetParent !== null
           ) as HTMLElement;
           if (label) { label.click(); return "span.tag-label"; }
 
-          // Priority 3: any visible li/span containing the tag text
           const any = Array.from(document.querySelectorAll("li, span, div, button")).find(
             el =>
               el.textContent?.trim().includes(tag) &&
@@ -635,7 +696,6 @@ function buildSteps(I: any): Step[] {
         if (clicked) {
           console.log(`    ℹ️  Tag selected via "${clicked}"`);
         } else {
-          // Last resort: press Enter to create/confirm the tag
           console.log(`    ⚠️  Tag dropdown item not found — pressing Enter to create/confirm`);
           await page.locator(tagInputSel).first().press("Enter");
         }
@@ -652,6 +712,7 @@ function buildSteps(I: any): Step[] {
         ctx.customerFound = true;
         ctx.newCustomerCreated = true;
         ctx.bookingPopupOpen = true;
+        ctx.matchedBy = "new-customer";
       },
     },
 
@@ -693,7 +754,6 @@ function buildSteps(I: any): Step[] {
 
         if (count === 0) { ctx.addressFound = false; return; }
 
-        // Get all card texts via evaluate
         const cardTexts: string[] = await page.evaluate(() =>
           Array.from(document.querySelectorAll(".address-card")).map(el => el.textContent || "")
         );
@@ -715,12 +775,10 @@ function buildSteps(I: any): Step[] {
 
         ctx.addressFound = true;
 
-        // Click the Schedule button inside the matched card via evaluate
         const clicked = await page.evaluate((idx: number) => {
           const cards = Array.from(document.querySelectorAll(".address-card"));
           const card = cards[idx];
           if (!card) return false;
-          // Try data-cy first, then any button/link with "Schedule" text
           const schedBtn =
             card.querySelector('[data-cy="address-schedule-link"]') ||
             Array.from(card.querySelectorAll("button, a")).find(el =>
@@ -742,7 +800,6 @@ function buildSteps(I: any): Step[] {
       name: "Open Address Actions dropdown",
       skipIf: (_, c) => addressFoundOrPopup(c),
       async run(page) {
-        // Clear search input
         const si = await firstVisible(page, ['sera-input[data-cy="address-search"] input'], 2000);
         if (si) {
           await page.locator(si).first().fill("");
@@ -756,7 +813,6 @@ function buildSteps(I: any): Step[] {
       name: "Click Add Address option",
       skipIf: (_, c) => addressFoundOrPopup(c),
       async run(page) {
-        // Use evaluate to find "Add Address" text anywhere
         const clicked = await page.evaluate(() => {
           const all = Array.from(document.querySelectorAll("*"));
           const el = all.find(
@@ -774,7 +830,6 @@ function buildSteps(I: any): Step[] {
       skipIf: (_, c) => addressFoundOrPopup(c),
       async run(page, ctx) {
         await waitUntilVisible(page, '.modal, [role="dialog"]', 10000);
-        // Find first text input inside the modal
         const modalInputSel = '.modal input[type="text"], [role="dialog"] input[type="text"]';
         await waitUntilVisible(page, modalInputSel, 5000);
         await page.locator(modalInputSel).first().click();
@@ -819,7 +874,6 @@ function buildSteps(I: any): Step[] {
       skipIf: (_, c) => addressFoundOrPopup(c),
       async run(page, ctx) {
         const modalSaveSel = '.modal button[type="submit"], [role="dialog"] button[type="submit"]';
-        // Use evaluate for robustness
         const saved = await page.evaluate(() => {
           const modal = document.querySelector('.modal, [role="dialog"]');
           if (!modal) return false;
@@ -830,7 +884,6 @@ function buildSteps(I: any): Step[] {
           return false;
         });
         if (!saved) {
-          // Fallback: try with locator
           await page.locator(modalSaveSel).first().click();
         }
         await page.waitForTimeout(2000);
@@ -842,7 +895,6 @@ function buildSteps(I: any): Step[] {
       name: "Find newly added address and click Schedule",
       skipIf: (_, c) => newAddrAdded(c),
       async run(page, ctx) {
-        // Wait for page to settle after modal close — addresses-cont may take a moment to re-render
         await page.waitForTimeout(3000);
         await waitUntilVisible(page, ".addresses-cont, .address-card", 150000);
         await page.waitForTimeout(1500);
@@ -850,8 +902,6 @@ function buildSteps(I: any): Step[] {
         const raw = ((ctx.actualStreetAddress || I.serviceAddress) as string).split(",")[0].trim();
         const sn = extractStreetNumber(raw);
 
-        // Try to use the search input — but treat it as optional since it may not be available
-        // after the add-address modal closes and the page re-renders
         const searchSelectors = [
           '[data-cy="address-search"] input',
           'sera-input[data-cy="address-search"] input',
@@ -871,7 +921,6 @@ function buildSteps(I: any): Step[] {
           console.log(`    ℹ️  No search input found — scanning all cards`);
         }
 
-        // Scan all address cards — try up to 3 times with a short wait between
         let matchedIndex = -1;
         for (let attempt = 0; attempt < 3; attempt++) {
           const cardTexts: string[] = await page.evaluate(() =>
@@ -881,12 +930,10 @@ function buildSteps(I: any): Step[] {
 
           matchedIndex = cardTexts.findIndex(t => addressesMatch(t, raw));
 
-          // Also accept: only one card and it contains the street number
           if (matchedIndex === -1 && cardTexts.length === 1 && sn && cardTexts[0].includes(sn)) {
             matchedIndex = 0;
           }
 
-          // Also accept: only one card (newly added — no other cards existed before)
           if (matchedIndex === -1 && cardTexts.length === 1) {
             console.log(`    ℹ️  Only 1 card found — assuming it's the newly added address`);
             matchedIndex = 0;
@@ -914,7 +961,6 @@ function buildSteps(I: any): Step[] {
         if (!clicked) throw new Error(`Schedule button not in card ${matchedIndex}`);
         await page.waitForTimeout(2000);
 
-        // Verify modal opened
         await waitUntilVisible(page, '.modal, [role="dialog"], .booking-popup, .modal-content', 8000);
         ctx.bookingPopupOpen = true;
       },
@@ -942,7 +988,6 @@ function buildSteps(I: any): Step[] {
     {
       name: "Open service category dropdown",
       async run(page) {
-        // Flat descendant selector — no chaining
         const inputSel = '[data-cy="service-category-select"] input[data-cy="select-input-field"], [data-cy="service-category-select"] .ss-input-field, [data-cy="service-category-select"] input';
         await waitUntilVisible(page, inputSel, 10000);
         await page.locator(inputSel).first().click();
@@ -954,8 +999,6 @@ function buildSteps(I: any): Step[] {
     {
       name: "Select service category option",
       async run(page) {
-        const optionSel = '.ss-option, [role="option"], [class*="option"]';
-        // Try exact text match via evaluate
         const clicked = await page.evaluate((cat: string) => {
           const options = Array.from(document.querySelectorAll('.ss-option, [role="option"], [class*="option"]'));
           const exact = options.find(el => el.textContent?.trim() === cat) as HTMLElement;
@@ -966,7 +1009,6 @@ function buildSteps(I: any): Step[] {
         }, I.serviceCategory);
 
         if (!clicked) {
-          // Fallback: keyboard nav
           const inputSel = '[data-cy="service-category-select"] input[data-cy="select-input-field"], [data-cy="service-category-select"] input';
           await page.locator(inputSel).first().press("ArrowDown");
           await page.waitForTimeout(300);
@@ -989,12 +1031,10 @@ function buildSteps(I: any): Step[] {
       name: "Select date on calendar",
       async run(page, _ctx, stagehand) {
         const domClickDate = async () => {
-          // Navigate to correct month if needed — click prev/next arrows
-          const targetMonth = I.appointmentDateMonth; // e.g. "March"
+          const targetMonth = I.appointmentDateMonth;
           const targetDay   = String(I.appointmentDateDay);
 
           for (let nav = 0; nav < 3; nav++) {
-            // Check if current calendar header contains target month
             const headerText: string = await page.evaluate(() => {
               const h = document.querySelector(
                 '.fc-toolbar-title, .calendar-header, .month-title, ' +
@@ -1006,7 +1046,6 @@ function buildSteps(I: any): Step[] {
 
             if (headerText.includes(targetMonth)) break;
 
-            // Click "next month" button
             const nextClicked = await page.evaluate(() => {
               const btn = (
                 document.querySelector('.fc-next-button, [aria-label="next"], [aria-label="Next"]') ||
@@ -1022,9 +1061,7 @@ function buildSteps(I: any): Step[] {
             await page.waitForTimeout(800);
           }
 
-          // Click the target day cell
           const dayClicked = await page.evaluate((day: string) => {
-            // Try data-date attributes first (FullCalendar style)
             const byCy = Array.from(
               document.querySelectorAll('[data-cy^="calendar-day-"], [data-date], td.fc-daygrid-day, .calendar-day')
             ).find(el => {
@@ -1035,7 +1072,6 @@ function buildSteps(I: any): Step[] {
             }) as HTMLElement | null;
             if (byCy) { byCy.click(); return true; }
 
-            // Fallback: find any visible element whose trimmed text is exactly the day number
             const byText = Array.from(document.querySelectorAll("td, .day, button")).find(el => {
               const t = el.textContent?.trim();
               return t === day && (el as HTMLElement).offsetParent !== null;
@@ -1049,7 +1085,6 @@ function buildSteps(I: any): Step[] {
           await page.waitForTimeout(1000);
         };
 
-        // --- Try AI agent with maxSteps: 30 to handle any month distance ---
         try {
           const agent = stagehand.agent({
             mode: "cua",
@@ -1073,7 +1108,6 @@ function buildSteps(I: any): Step[] {
             console.log(`    ⚠️  AI agent quota error — falling back to DOM date click`);
             await domClickDate();
           } else {
-            // Non-quota error: still try DOM fallback before giving up
             console.log(`    ⚠️  AI agent error (${agentErr.message}) — trying DOM fallback`);
             await domClickDate();
           }
@@ -1083,7 +1117,6 @@ function buildSteps(I: any): Step[] {
     {
       name: "Verify date selected and wait for time slots",
       async run(page, ctx) {
-        // Scroll modal back to top
         await page.evaluate(() => {
           const m = document.querySelector('.modal-content, [role="dialog"]');
           if (m) (m as any).scrollTop = 0;
@@ -1092,7 +1125,6 @@ function buildSteps(I: any): Step[] {
         await page.waitForTimeout(500);
         ctx.selectedDate = I.appointmentDateDay;
 
-        // Wait for time slots
         for (const sel of ['[data-cy^="time-slot-"]', ".slot-button"]) {
           try {
             await waitUntilVisible(page, sel, 150000);
@@ -1111,7 +1143,6 @@ function buildSteps(I: any): Step[] {
       async run(page, ctx) {
         await page.waitForTimeout(1000);
 
-        // Gather slot data via evaluate (getAttribute not available on locators)
         const slotData: Array<{ index: number; label: string; dataCy: string; classes: string }> =
           await page.evaluate(() =>
             Array.from(document.querySelectorAll('[data-cy^="time-slot-"]')).map((el, i) => ({
@@ -1154,7 +1185,6 @@ function buildSteps(I: any): Step[] {
           ctx.timeSlotDiffers = false;
         }
 
-        // Scroll into view then click via evaluate
         await page.evaluate((idx: number) => {
           const slots = Array.from(document.querySelectorAll('[data-cy^="time-slot-"]'));
           const el = slots[idx] as HTMLElement;
@@ -1166,7 +1196,7 @@ function buildSteps(I: any): Step[] {
 
         ctx.selectedTimeSlot = target.label;
         const time = target.label;
-ctx.completionMessage = `Booking successful for ${I.firstName} ${I.lastName} at ${I.serviceAddress} on ${I.appointmentDate} at ${time}.`;
+        ctx.completionMessage = `Booking successful for ${I.firstName} ${I.lastName} at ${I.serviceAddress} on ${I.appointmentDate} at ${time}.`;
         await page.waitForTimeout(500);
       },
     },
@@ -1175,7 +1205,6 @@ ctx.completionMessage = `Booking successful for ${I.firstName} ${I.lastName} at 
       async run(page, ctx) {
         const selectedVisible = await page.locator('[data-cy^="time-slot-"].selected, .slot-button.selected').first().isVisible();
         if (!selectedVisible) {
-          // Click first available slot as fallback
           await page.locator('[data-cy^="time-slot-"]:not(.disabled)').first().click();
           await page.waitForTimeout(500);
           const label = await page.locator('[data-cy^="time-slot-"].selected, .slot-button.selected').first().textContent();
@@ -1213,6 +1242,7 @@ ctx.completionMessage = `Booking successful for ${I.firstName} ${I.lastName} at 
           `Message for Team: ${I.messageForTeam}`,
           `Call Outcome: ${I.callOutcome}`,
           `Call ID: ${I.callId}`,
+          `Customer Matched By: ${ctx.matchedBy || "new-customer"}`,
         ].join("\n");
 
         const taSel = 'textarea[name*="notes" i], textarea[placeholder*="Notes" i], textarea';
@@ -1225,7 +1255,6 @@ ctx.completionMessage = `Booking successful for ${I.firstName} ${I.lastName} at 
       name: "Click Save (modal flow)",
       skipIf: (_, c) => !!c.newCustomerCreated,
       async run(page) {
-        // Try data-cy first, then find any visible Save/Submit button via evaluate
         const byCy = await page.locator('[data-cy="modal-submit-btn"]').first().isVisible();
         if (byCy) {
           await page.locator('[data-cy="modal-submit-btn"]').first().click();
@@ -1233,7 +1262,6 @@ ctx.completionMessage = `Booking successful for ${I.firstName} ${I.lastName} at 
         }
 
         const clicked = await page.evaluate(() => {
-          // Look inside any open modal first
           const modal = document.querySelector('.modal-content, [role="dialog"], .booking-popup');
           const scope = modal || document;
           const btn = Array.from(scope.querySelectorAll('button, input[type="submit"]')).find(
@@ -1248,7 +1276,6 @@ ctx.completionMessage = `Booking successful for ${I.firstName} ${I.lastName} at 
         });
 
         if (!clicked) {
-          // Last resort: click by type=submit
           await page.locator('button[type="submit"]').first().click();
         } else {
           console.log(`    ℹ️  Clicked save button: "${clicked}"`);
@@ -1291,20 +1318,20 @@ ctx.completionMessage = `Booking successful for ${I.firstName} ${I.lastName} at 
       skipIf: (_, c) => !!c.newCustomerCreated,
       async run(page, ctx) {
         let modalVisible = false;
-for (let i = 0; i < 10; i++) {
-  await page.waitForTimeout(1000);
-  modalVisible = await page.locator('.modal-content, [role="dialog"]').first().isVisible();
-  if (!modalVisible) break;
-}
-if (modalVisible) {
-  const errText: string = await page.evaluate(() => {
-    const err = document.querySelector('.error, .validation-error, [class*="alert-danger"], [class*="flash-error"]');
-    return err ? (err.textContent?.trim() || "") : "";
-  });
-  if (errText) throw new Error(`Booking failed with error: ${errText}`);
-  console.log(`    ⚠️  Modal still visible after 10s but no error found — assuming saved`);
-}
-ctx.bookingSaved = true;
+        for (let i = 0; i < 10; i++) {
+          await page.waitForTimeout(1000);
+          modalVisible = await page.locator('.modal-content, [role="dialog"]').first().isVisible();
+          if (!modalVisible) break;
+        }
+        if (modalVisible) {
+          const errText: string = await page.evaluate(() => {
+            const err = document.querySelector('.error, .validation-error, [class*="alert-danger"], [class*="flash-error"]');
+            return err ? (err.textContent?.trim() || "") : "";
+          });
+          if (errText) throw new Error(`Booking failed with error: ${errText}`);
+          console.log(`    ⚠️  Modal still visible after 10s but no error found — assuming saved`);
+        }
+        ctx.bookingSaved = true;
       },
     },
     {
@@ -1324,6 +1351,7 @@ ctx.bookingSaved = true;
       async run(_page, ctx) {
         const time = ctx.selectedTimeSlot || I.appointmentTime;
         let msg = `Booking successful for ${I.firstName} ${I.lastName} at ${I.serviceAddress} on ${I.appointmentDate} at ${time}.`;
+        msg += `\nCustomer matched by: ${ctx.matchedBy || "new-customer-created"}`;
         if (ctx.newAddressAdded) msg += `\nNote: New address was added to customer profile.`;
         if (ctx.timeSlotDiffers) msg += `\nNote: Requested time "${I.appointmentTime}" unavailable. Booked "${time}" instead.`;
         console.log(`\n🎉 ${msg}`);
@@ -1382,6 +1410,7 @@ export async function runBookingTask(input: any) {
     await stagehand.init();
     sessionUrl = `https://browserbase.com/sessions/${stagehand.browserbaseSessionID}`;
     console.log(`✅ Session: ${sessionUrl}`);
+    console.log(`📞 Search order: Phone → Address → Email (phone-first to prevent duplicates)`);
 
     const page = stagehand.context.pages()[0];
 
