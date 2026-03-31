@@ -218,87 +218,115 @@ export async function declineQuotesOnPage(input: {
       log.success(`Now on page ${pageNumber}`);
     }
 
-    // ==================== STEP 4: COLLECT JOB IDS ====================
+    // ==================== STEP 4: COLLECT JOB IDs FROM JOB COLUMN ====================
     log.section("STEP 4 — Collect Job IDs");
-    log.info("Scanning table rows for job IDs");
+    log.info("Scanning JOB column in appointments table");
 
+    // From inspecting the DOM, the table is:
+    //   table#jobs-table.dataTable > tbody.table-data > tr > td
+    // The APPOINTMENT column: <td><a href="/jobs/8939069?appointment_id=...">9325972</a></td>
+    //   → href contains BOTH job ID and appointment_id query param
+    // The JOB column:         <td><a href="/jobs/8939069">8939069</a></td>
+    //   → href is exactly /jobs/{id} with NO query string
+    //
+    // Key distinction: APPOINTMENT link href has "?appointment_id=" in it,
+    // JOB column link href is clean (/jobs/ID only, no query string).
     const jobIds: string[] = await page.evaluate(() => {
       const ids: string[] = [];
-      const rows = document.querySelectorAll('table tbody tr, tbody.table-data tr');
+      const seen = new Set<string>();
+
+      const rows = document.querySelectorAll('table#jobs-table tbody.table-data tr, table tbody.table-data tr, table tbody tr');
       for (const row of rows) {
-        const firstJobLink = row.querySelector('a[href*="/jobs/"]');
-        if (firstJobLink) {
-          const href = firstJobLink.getAttribute('href') || '';
-          const match = href.match(/\/jobs\/(\d+)/);
-          if (match) { ids.push(match[1]); continue; }
+        let jobId: string | null = null;
+
+        // Strategy 1 (most reliable): find the <a> whose href is exactly /jobs/{id}
+        // with NO query string — that is the JOB column link.
+        const allLinks = row.querySelectorAll('a[href*="/jobs/"]');
+        for (const link of allLinks) {
+          const href = link.getAttribute('href') || '';
+          // Must match /jobs/DIGITS and nothing after (no ? or other path segments)
+          const match = href.match(/^\/jobs\/(\d+)$/);
+          if (match) {
+            jobId = match[1];
+            break;
+          }
         }
-        const cells = row.querySelectorAll('td');
-        for (const cell of cells) {
-          const text = cell.textContent?.trim() || '';
-          if (/^\d{6,}$/.test(text)) { ids.push(text); break; }
+
+        // Strategy 2 (fallback): find the JOB column by header index
+        if (!jobId) {
+          const headerCells = document.querySelectorAll('table thead th, table thead td');
+          let jobColIndex = -1;
+          headerCells.forEach((th, i) => {
+            if (th.textContent?.trim().toUpperCase() === 'JOB') jobColIndex = i;
+          });
+          if (jobColIndex >= 0) {
+            const cells = row.querySelectorAll('td');
+            if (cells[jobColIndex]) {
+              const text = cells[jobColIndex].textContent?.trim() || '';
+              if (/^\d{6,8}$/.test(text)) jobId = text;
+            }
+          }
+        }
+
+        if (jobId && !seen.has(jobId)) {
+          seen.add(jobId);
+          ids.push(jobId);
         }
       }
       return ids;
     });
 
-    log.info(`Primary method found ${jobIds.length} job IDs`, { jobIds: jobIds.slice(0, 20) });
+    log.info(`JOB column scan found ${jobIds.length} job IDs`, { jobIds });
 
     if (jobIds.length === 0) {
-      log.warn("No job IDs found via primary method — trying fallback");
-      const fallbackIds: string[] = await page.evaluate(() => {
-        const ids: string[] = [];
-        const rows = document.querySelectorAll('table tbody tr, tbody.table-data tr');
-        for (const row of rows) {
-          const link = row.querySelector('a[href*="/jobs/"]');
-          if (link) {
-            const href = link.getAttribute('href') || '';
-            const match = href.match(/\/jobs\/(\d+)/);
-            if (match) { ids.push(match[1]); }
-          }
-        }
-        return ids;
+      // Last resort: dump the raw HTML of the first row for debugging
+      const debugHtml = await page.evaluate(() => {
+        const firstRow = document.querySelector('table tbody tr');
+        return firstRow ? firstRow.innerHTML.substring(0, 2000) : 'NO ROWS FOUND';
       });
-
-      if (fallbackIds.length === 0) {
-        log.warn("Fallback also found no job IDs — page may be empty");
-        log.summary({ jobsProcessed: 0, quotesDeclined: 0, errors, sessionUrl });
-        await stagehand.close();
-        return {
-          status: "COMPLETED",
-          result: `Page ${pageNumber}: No jobs found`,
-          jobsProcessed: 0,
-          quotesDeclined: 0,
-          sessionUrl,
-          logFilePath: log.logFilePath,
-        };
-      }
-
-      jobIds.push(...fallbackIds);
-      log.info(`Fallback found ${fallbackIds.length} job IDs`, { jobIds: fallbackIds.slice(0, 20) });
+      log.warn("No job IDs found — dumping first row HTML for debugging", { debugHtml });
+      log.summary({ jobsProcessed: 0, quotesDeclined: 0, errors, sessionUrl });
+      await stagehand.close();
+      return {
+        status: "COMPLETED",
+        result: `Page ${pageNumber}: No jobs found`,
+        jobsProcessed: 0,
+        quotesDeclined: 0,
+        sessionUrl,
+        logFilePath: log.logFilePath,
+      };
     }
 
     log.success(`Total job IDs to process: ${jobIds.length}`, { jobIds });
 
-    // ==================== STEP 5: PROCESS EACH JOB ====================
+    // ==================== STEP 5: PROCESS EACH JOB (SINGLE REUSED TAB) ====================
+    // IMPORTANT: Browserbase has a hard limit of 10 tabs per session.
+    // Instead of opening a new tab per job (which piles up), we open ONE job tab
+    // and navigate it to each job in turn. This keeps tab count at exactly 2
+    // (the appointments tab + the job tab) for the entire run.
     log.section("STEP 5 — Process Jobs");
+    log.info("Opening single reusable job tab (Browserbase limit: 10 tabs)");
+    const jobPage = await stagehand.context.newPage();
+    log.success("Job tab opened — will reuse for all jobs");
 
     for (const jobId of jobIds) {
       log.info(`──────────────────────────────────────`);
       log.info(`Processing job`, { jobId });
 
-      let newPage: any = null;
       try {
         const jobQuotesUrl = `https://misterquik.sera.tech/jobs/${jobId}?tab=jp_Quotes`;
-        log.info(`Opening Quotes tab in new browser tab`, { jobQuotesUrl });
+        log.info(`Navigating job tab to Quotes page`, { jobQuotesUrl });
 
-        newPage = await stagehand.context.newPage();
         try {
-          await newPage.goto(jobQuotesUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+          await jobPage.goto(jobQuotesUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
         } catch {
           log.warn(`Job page load timed out — continuing`, { jobId });
         }
-        await newPage.waitForTimeout(5000);
-        log.success(`Quotes tab opened`, { jobId });
+        await jobPage.waitForTimeout(5000);
+        log.success(`Quotes tab loaded`, { jobId });
+
+        // Alias so all the existing code below that references newPage still works
+        const newPage = jobPage;
 
         let hasMoreOpenQuotes = true;
         let quotesOnThisJob = 0;
@@ -513,19 +541,22 @@ export async function declineQuotesOnPage(input: {
         jobsProcessed++;
 
       } finally {
-        // ALWAYS close the job tab — no matter what happened above.
-        // Leaving tabs open wastes Browserbase CPU/RAM and slows every
-        // subsequent job. With try/finally this is guaranteed even on errors.
-        if (newPage) {
-          try {
-            await newPage.close();
-            log.info(`Tab closed`, { jobId });
-          } catch (closeErr: any) {
-            log.warn(`Could not close tab (may already be closed)`, { jobId, error: (closeErr as any).message });
-          }
+        // We reuse jobPage across all jobs (not closing it here).
+        // Just navigate to blank to free memory from the previous job's DOM.
+        try {
+          await jobPage.goto("about:blank", { waitUntil: "commit", timeout: 5000 });
+          log.info(`Job tab cleared (navigated to about:blank)`, { jobId });
+        } catch {
+          // Non-fatal — page may have already been reset
         }
       }
     }
+
+    // Close the single reusable job tab after all jobs are done
+    try {
+      await jobPage.close();
+      log.info("Reusable job tab closed after processing all jobs");
+    } catch {}
 
     // ==================== DONE ====================
     const resultMsg = `Page ${pageNumber}: Processed ${jobsProcessed} jobs, declined ${quotesDeclined} quotes`;
