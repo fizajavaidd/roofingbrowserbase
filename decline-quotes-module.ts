@@ -126,6 +126,11 @@ export async function declineQuotesOnPage(input: {
     model: "google/gemini-2.5-flash",
     verbose: DEBUG ? 2 : 1,
     disablePino: !DEBUG,
+    browserbaseSessionCreateParams: {
+      projectId: process.env.BROWSERBASE_PROJECT_ID,
+      timeout: 900,
+      keepAlive: true,
+    },
   });
 
   let sessionUrl = "";
