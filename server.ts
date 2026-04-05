@@ -6,6 +6,7 @@ import { getAppointmentPageCount } from "./appointment-page-count-module.js";
 import { runMembershipTask } from "./active-membership-server.js";
 import { runQBOBatchTask } from "./qbo-batch-server.js";
 import crypto from "crypto";
+import { runRoofingBookingTask } from "./browserbase-roofing-booking-task-module.js";
 
 const app = express();
 app.use(express.json());
@@ -72,6 +73,32 @@ app.post("/book", authCheck, async (req, res) => {
     });
   } catch (error: any) {
     console.error(`❌ Task failed: ${error.message}`);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Roofing booking endpoint (sync)
+app.post("/book-roofing", authCheck, async (req, res) => {
+  const startTime = Date.now();
+  console.log(`📥 Roofing booking request: ${req.body.firstName} ${req.body.lastName}`);
+  
+  try {
+    const result = await runRoofingBookingTask(req.body);
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+
+    res.json({
+      success: result.success,
+      message: result.context?.completionMessage || null,
+      stepsRun: result.stepsRun,
+      stepsSkipped: result.stepsSkipped,
+      totalSteps: result.totalSteps,
+      elapsedMinutes: result.elapsedMinutes,
+      sessionUrl: result.sessionUrl || null,
+      context: result.context,
+    });
+    console.log(`📤 Roofing booking completed in ${elapsed}s`);
+  } catch (error: any) {
+    console.error(`❌ Roofing booking failed: ${error.message}`);
     res.status(500).json({ success: false, error: error.message });
   }
 });
