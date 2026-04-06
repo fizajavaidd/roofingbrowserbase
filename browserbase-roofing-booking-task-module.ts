@@ -1365,7 +1365,7 @@ function buildSteps(I: any): Step[] {
 // EXPORTED FUNCTION — called by server.ts
 // =============================================================================
 
-export async function runBookingTask(input: any) {
+export async function runRoofingBookingTask(input: any) {
   const INPUTS = {
     stratablueRoofEmail: process.env.STRATABLUE_ROOF_EMAIL || "support@stratablue.ai",
     stratablueRoofPassword: process.env.STRATABLUE_ROOF_PASSWORD || "",
@@ -1377,7 +1377,7 @@ export async function runBookingTask(input: any) {
     locationType: input.locationType || "Residential",
     locationName: input.locationName || "Home",
     customerTag: input.customerTag || "Cust Created By AI",
-    serviceCategory: input.serviceCategory || "PLUM",
+    serviceCategory: input.serviceCategory || "Roof Repair",
     appointmentDate: input.appointmentDate || "Not Provided",
     appointmentDateDay: input.appointmentDateDay || "Not Provided",
     appointmentDateMonth: input.appointmentDateMonth || "Not Provided",
