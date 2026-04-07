@@ -51,57 +51,181 @@ app.get("/", (_req, res) => {
   res.json({ service: "stratablue-automation-api", status: "running" });
 });
 
-// Booking endpoint (sync)
+// Mr Quik booking endpoint (ASYNC — returns taskId, poll for status)
 app.post("/book", authCheck, async (req, res) => {
+  const taskId = crypto.randomUUID();
   const startTime = Date.now();
-  console.log(`\n📥 Received booking request at ${new Date().toISOString()}`);
+  console.log(`\n📥 Booking request at ${new Date().toISOString()}, taskId=${taskId}`);
   console.log(`   Customer: ${req.body.firstName} ${req.body.lastName}`);
   console.log(`   Address: ${req.body.serviceAddress}`);
-  try {
-    const result = await runBookingTask(req.body);
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`📤 Completed in ${elapsed}s — success: ${result.success}\n`);
-    res.json({
-      success: result.success,
-      message: result.context?.completionMessage || null,
-      stepsRun: result.stepsRun,
-      stepsSkipped: result.stepsSkipped,
-      totalSteps: result.totalSteps,
-      elapsedMinutes: result.elapsedMinutes,
-      sessionUrl: result.sessionUrl || null,
-      context: result.context,
+
+  tasks[taskId] = {
+    status: "RUNNING",
+    result: "Processing booking...",
+    jobsProcessed: 0,
+    quotesDeclined: 0,
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+  };
+
+  // Return taskId immediately
+  res.json({
+    data: {
+      status: "STARTED",
+      taskId,
+      message: `Booking started. Poll GET /task/${taskId} for result.`,
+    },
+  });
+
+  // Run in background
+  runBookingTask(req.body)
+    .then((result) => {
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      console.log(`📤 Task ${taskId} completed in ${elapsed}s — success: ${result.success}\n`);
+      tasks[taskId] = {
+        status: result.success ? "COMPLETED" : "FAILED",
+        result: result.context?.completionMessage || "Booking completed",
+        jobsProcessed: 0,
+        quotesDeclined: 0,
+        startedAt: tasks[taskId].startedAt,
+        completedAt: new Date().toISOString(),
+        extraData: {
+          success: result.success,
+          message: result.context?.completionMessage || null,
+          stepsRun: result.stepsRun,
+          stepsSkipped: result.stepsSkipped,
+          totalSteps: result.totalSteps,
+          elapsedMinutes: result.elapsedMinutes,
+          sessionUrl: result.sessionUrl || null,
+          context: result.context,
+        },
+      };
+    })
+    .catch((error) => {
+      console.error(`❌ Task ${taskId} failed: ${error.message}`);
+      tasks[taskId] = {
+        status: "FAILED",
+        result: `Error: ${error.message}`,
+        jobsProcessed: 0,
+        quotesDeclined: 0,
+        startedAt: tasks[taskId].startedAt,
+        completedAt: new Date().toISOString(),
+      };
     });
-  } catch (error: any) {
-    console.error(`❌ Task failed: ${error.message}`);
-    res.status(500).json({ success: false, error: error.message });
-  }
 });
 
-// Roofing booking endpoint (sync)
+// Roofing booking endpoint (ASYNC — returns taskId, poll for status)
 app.post("/book-roofing", authCheck, async (req, res) => {
+  const taskId = crypto.randomUUID();
   const startTime = Date.now();
-  console.log(`📥 Roofing booking request: ${req.body.firstName} ${req.body.lastName}`);
-  
-  try {
-    const result = await runRoofingBookingTask(req.body);
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  console.log(`📥 Roofing booking: taskId=${taskId}, customer: ${req.body.firstName} ${req.body.lastName}`);
 
-    res.json({
-      success: result.success,
-      message: result.context?.completionMessage || null,
-      stepsRun: result.stepsRun,
-      stepsSkipped: result.stepsSkipped,
-      totalSteps: result.totalSteps,
-      elapsedMinutes: result.elapsedMinutes,
-      sessionUrl: result.sessionUrl || null,
-      context: result.context,
+  tasks[taskId] = {
+    status: "RUNNING",
+    result: "Processing roofing booking...",
+    jobsProcessed: 0,
+    quotesDeclined: 0,
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+  };
+
+  // Return taskId immediately
+  res.json({
+    data: {
+      status: "STARTED",
+      taskId,
+      message: `Roofing booking started. Poll GET /task/${taskId} for result.`,
+    },
+  });
+
+  // Run in background
+  runRoofingBookingTask(req.body)
+    .then((result) => {
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      console.log(`📤 Roofing task ${taskId} done in ${elapsed}s: success=${result.success}`);
+      tasks[taskId] = {
+        status: result.success ? "COMPLETED" : "FAILED",
+        result: result.context?.completionMessage || "Booking completed",
+        jobsProcessed: 0,
+        quotesDeclined: 0,
+        startedAt: tasks[taskId].startedAt,
+        completedAt: new Date().toISOString(),
+        extraData: {
+          success: result.success,
+          message: result.context?.completionMessage || null,
+          stepsRun: result.stepsRun,
+          stepsSkipped: result.stepsSkipped,
+          totalSteps: result.totalSteps,
+          elapsedMinutes: result.elapsedMinutes,
+          sessionUrl: result.sessionUrl || null,
+          context: result.context,
+        },
+      };
+    })
+    .catch((error) => {
+      console.error(`❌ Roofing task ${taskId} failed: ${error.message}`);
+      tasks[taskId] = {
+        status: "FAILED",
+        result: `Error: ${error.message}`,
+        jobsProcessed: 0,
+        quotesDeclined: 0,
+        startedAt: tasks[taskId].startedAt,
+        completedAt: new Date().toISOString(),
+      };
     });
-    console.log(`📤 Roofing booking completed in ${elapsed}s`);
-  } catch (error: any) {
-    console.error(`❌ Roofing booking failed: ${error.message}`);
-    res.status(500).json({ success: false, error: error.message });
-  }
 });
+
+// // Booking endpoint (sync)
+// app.post("/book", authCheck, async (req, res) => {
+//   const startTime = Date.now();
+//   console.log(`\n📥 Received booking request at ${new Date().toISOString()}`);
+//   console.log(`   Customer: ${req.body.firstName} ${req.body.lastName}`);
+//   console.log(`   Address: ${req.body.serviceAddress}`);
+//   try {
+//     const result = await runBookingTask(req.body);
+//     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+//     console.log(`📤 Completed in ${elapsed}s — success: ${result.success}\n`);
+//     res.json({
+//       success: result.success,
+//       message: result.context?.completionMessage || null,
+//       stepsRun: result.stepsRun,
+//       stepsSkipped: result.stepsSkipped,
+//       totalSteps: result.totalSteps,
+//       elapsedMinutes: result.elapsedMinutes,
+//       sessionUrl: result.sessionUrl || null,
+//       context: result.context,
+//     });
+//   } catch (error: any) {
+//     console.error(`❌ Task failed: ${error.message}`);
+//     res.status(500).json({ success: false, error: error.message });
+//   }
+// });
+
+// // Roofing booking endpoint (sync)
+// app.post("/book-roofing", authCheck, async (req, res) => {
+//   const startTime = Date.now();
+//   console.log(`📥 Roofing booking request: ${req.body.firstName} ${req.body.lastName}`);
+  
+//   try {
+//     const result = await runRoofingBookingTask(req.body);
+//     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+
+//     res.json({
+//       success: result.success,
+//       message: result.context?.completionMessage || null,
+//       stepsRun: result.stepsRun,
+//       stepsSkipped: result.stepsSkipped,
+//       totalSteps: result.totalSteps,
+//       elapsedMinutes: result.elapsedMinutes,
+//       sessionUrl: result.sessionUrl || null,
+//       context: result.context,
+//     });
+//     console.log(`📤 Roofing booking completed in ${elapsed}s`);
+//   } catch (error: any) {
+//     console.error(`❌ Roofing booking failed: ${error.message}`);
+//     res.status(500).json({ success: false, error: error.message });
+//   }
+// });
 
 // Appointment page count endpoint (sync)
 app.post("/appointment-pages", authCheck, async (req, res) => {
