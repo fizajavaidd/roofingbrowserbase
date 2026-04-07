@@ -175,58 +175,6 @@ app.post("/book-roofing", authCheck, async (req, res) => {
     });
 });
 
-// // Booking endpoint (sync)
-// app.post("/book", authCheck, async (req, res) => {
-//   const startTime = Date.now();
-//   console.log(`\n📥 Received booking request at ${new Date().toISOString()}`);
-//   console.log(`   Customer: ${req.body.firstName} ${req.body.lastName}`);
-//   console.log(`   Address: ${req.body.serviceAddress}`);
-//   try {
-//     const result = await runBookingTask(req.body);
-//     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-//     console.log(`📤 Completed in ${elapsed}s — success: ${result.success}\n`);
-//     res.json({
-//       success: result.success,
-//       message: result.context?.completionMessage || null,
-//       stepsRun: result.stepsRun,
-//       stepsSkipped: result.stepsSkipped,
-//       totalSteps: result.totalSteps,
-//       elapsedMinutes: result.elapsedMinutes,
-//       sessionUrl: result.sessionUrl || null,
-//       context: result.context,
-//     });
-//   } catch (error: any) {
-//     console.error(`❌ Task failed: ${error.message}`);
-//     res.status(500).json({ success: false, error: error.message });
-//   }
-// });
-
-// // Roofing booking endpoint (sync)
-// app.post("/book-roofing", authCheck, async (req, res) => {
-//   const startTime = Date.now();
-//   console.log(`📥 Roofing booking request: ${req.body.firstName} ${req.body.lastName}`);
-  
-//   try {
-//     const result = await runRoofingBookingTask(req.body);
-//     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-
-//     res.json({
-//       success: result.success,
-//       message: result.context?.completionMessage || null,
-//       stepsRun: result.stepsRun,
-//       stepsSkipped: result.stepsSkipped,
-//       totalSteps: result.totalSteps,
-//       elapsedMinutes: result.elapsedMinutes,
-//       sessionUrl: result.sessionUrl || null,
-//       context: result.context,
-//     });
-//     console.log(`📤 Roofing booking completed in ${elapsed}s`);
-//   } catch (error: any) {
-//     console.error(`❌ Roofing booking failed: ${error.message}`);
-//     res.status(500).json({ success: false, error: error.message });
-//   }
-// });
-
 // Appointment page count endpoint (sync)
 app.post("/appointment-pages", authCheck, async (req, res) => {
   const dateFilter = req.body.dateFilter;
